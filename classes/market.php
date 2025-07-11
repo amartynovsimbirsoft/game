@@ -114,7 +114,10 @@ class Market
         }
 
         if ($this->empl_sum != 0) {
-            $this->empl_demand = $this->hire_sum / $this->empl_sum + $this->factors->x_empl_demand;
+            // Делаем спрос зависимым от рыночной активности
+            $market_activity = ($this->iSales_sum + $this->iAccount_sum) / ($this->empl_sum + 1);
+            $this->empl_demand = ($this->hire_sum / ($this->empl_sum + 1)) 
+                   * (0.5 + 0.5 * tanh($market_activity - 0.7));
         }
         else {
             $this->empl_demand = 0;
@@ -133,10 +136,24 @@ class Market
             // нормализованные значения инвестиций, от суммы всех инвестиций всех компаний
             // например, если значение x_iHR будет 0.5, это означает, что эта компания делает 50%
             // всех инвестиций в отрасли, что очень много
-            if ($this->iHR_sum != 0)        $company->calc->x_iHR       = $company->turn->iHR / $this->iHR_sum;
-            if ($this->iSales_sum !=0)      $company->calc->x_iSales    = $company->turn->iSales / $this->iSales_sum;
-            if ($this->iAccount_sum != 0)   $company->calc->x_iAccount  = $company->turn->iAccount / $this->iAccount_sum;
-            if ($this->iPE_sum != 0)        $company->calc->x_iPE       = $company->turn->iPE / $this->iPE_sum;
+
+            // Вместо линейной отдачи зависимости найма от вложений добавил логарифмическую зависимость
+            if ($this->iHR_sum != 0)        $company->calc->x_iHR       = $company->calc->x_iHR = log(1 + $company->turn->iHR) / log(1 + $this->iHR_sum);
+            // Добавляем "эффективность маркетинга" с убывающей отдачей
+            if ($this->iSales_sum !=0) {
+                $sales_efficiency = 1 - exp(-0.005 * $company->turn->iSales);
+                $company->calc->x_iSales = $sales_efficiency * sqrt($company->turn->iSales) / $this->iSales_sum;
+            }      
+            // Учитываем масштаб компании (большим компаниям сложнее расти %)
+            if ($this->iAccount_sum != 0) {
+                $account_multiplier = 1 / (1 + 0.01 * $company->attr->empl);
+                $company->calc->x_iAccount = $account_multiplier * pow($company->turn->iAccount, 0.8) / pow($this->iAccount_sum, 0.9);
+            }  
+            // S-образная кривая отдачи
+            if ($this->iPE_sum != 0) {
+                $pe_effect = 1 / (1 + exp(-0.01 * ($company->turn->iPE - $this->iPE_sum / count($this->companies))));
+                $company->calc->x_iPE = $pe_effect * ($company->turn->iPE / ($this->iPE_sum + 1));
+            }  
 
             $company->calc->dismissal_free_specialists = DismissalFreeSpecialists::formula($this, $company);
             $company->calc->hunting_specialists = HuntingSpecialists::formula($this, $company);
@@ -151,11 +168,25 @@ class Market
             $company->calc->fire_costs = $v[1];
 
             $company->calc->salary_increase = SalaryIncrease::formula($this, $company);
+
+
             $company->calc->income = Income::formula($this, $company);
+            
+            // Штраф за дизбалланс
+            $investment_balance = 1 - 0.3 * (
+                abs($company->calc->x_iHR - $company->calc->x_iSales) +
+                abs($company->calc->x_iSales - $company->calc->x_iAccount) +
+                abs($company->calc->x_iAccount - $company->calc->x_iPE)
+            ) / 3;
+            $company->calc->income *= $investment_balance;
+            
             $company->calc->tax = Tax::formula($this, $company);
             $company->calc->FOT = FOT::formula($this, $company);
 
             $company->calc->empl_sold_by_sales = EmplSoldBySales::formula($this, $company);
+
+            $company->calc->empl_sold_by_sales *= $investment_balance;
+
             $company->calc->empl_sold_by_accounts = EmplSoldByAccounts::formula($this, $company);
             $company->calc->rate_inc_by_sales = RateIncBySales::formula($this, $company);
             $company->calc->rate_inc_by_accounts = RateIncByAccounts::formula($this, $company);
